@@ -13,6 +13,7 @@ AllowShortFunctionsOnASingleLine: Empty
 AlwaysBreakTemplateDeclarations: Yes
 BreakBeforeBinaryOperators: NonAssignment
 ColumnLimit: 360
+ReflowComments: true
 IncludeBlocks: Regroup
 IncludeCategories:
   - Regex: '^<yvals(_core)?\.h>$'
