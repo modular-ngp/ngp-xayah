@@ -1,3 +1,6 @@
+#include <tiny-cuda-nn/common_host.h>
+#include <tiny-cuda-nn/gpu_memory.h>
+#include <tiny-cuda-nn/multi_stream.h>
 #include <args.hxx>
 #include <vector>
 #include <string>
@@ -31,19 +34,75 @@ struct ArgParserPack {
           width_flag(parser, "WIDTH", "Resolution width of the GUI.", {"width"}),
           height_flag(parser, "HEIGHT", "Resolution height of the GUI.", {"height"}),
           version_flag(parser, "VERSION", "Display the version.", {'v', "version"}),
-          files(parser, "files", "Files to be loaded.") {}
+          files(parser, "files", "Files to be loaded.") {
+    }
+};
+
+
+struct TestBed {
+    struct CudaDevice {
+        CudaDevice(const int id, const bool is_primary) : m_id(id), m_is_primary(is_primary) {
+        }
+
+        int m_id;
+        bool m_is_primary;
+    };
+
+    TestBed() {
+        const auto active_device             = tcnn::cuda_device();
+        const auto active_compute_capability = tcnn::cuda_compute_capability();
+        const int n_devices                  = tcnn::cuda_device_count();
+        std::cout << "Active CUDA Device: " << active_device << "\n";
+        std::cout << "Active CUDA Compute Capability: " << active_compute_capability << "\n";
+        std::cout << "Number of CUDA Devices: " << n_devices << "\n";
+
+        m_devices.emplace_back(active_device, true);
+
+        m_network_config = {
+            {"loss", {{"otype", "L2"}}},
+            {"optimizer",
+             {
+                 {"otype", "Adam"},
+                 {"learning_rate", 1e-3},
+                 {"beta1", 0.9f},
+                 {"beta2", 0.99f},
+                 {"epsilon", 1e-15f},
+                 {"l2_reg", 1e-6f},
+             }},
+            {"encoding",
+             {
+                 {"otype", "HashGrid"},
+                 {"n_levels", 16},
+                 {"n_features_per_level", 2},
+                 {"log2_hashmap_size", 19},
+                 {"base_resolution", 16},
+             }},
+            {"network",
+             {
+                 {"otype", "FullyFusedMLP"},
+                 {"n_neurons", 64},
+                 {"n_layers", 2},
+                 {"activation", "ReLU"},
+                 {"output_activation", "None"},
+             }},
+        };
+    }
+
+    tcnn::StreamAndEvent m_stream;
+    std::vector<CudaDevice> m_devices;
+    nlohmann::json m_network_config;
 };
 
 int main(int argc, char* argv[]) {
     std::vector<std::string> arguments(argv, argv + argc);
 
-    ArgParserPack ap;
-    auto &parser = ap.parser;
-
     if (arguments.empty()) {
         std::cerr << "Number of arguments must be bigger than 0." << std::endl;
         return -3;
     }
+
+    ArgParserPack ap;
+    auto& parser = ap.parser;
 
     try {
         parser.Prog(arguments.front());
@@ -58,5 +117,7 @@ int main(int argc, char* argv[]) {
         std::cerr << e.what() << "\n" << parser;
         return -2;
     }
+
+    TestBed test_bed;
     return 0;
 }
