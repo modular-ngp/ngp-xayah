@@ -24,6 +24,18 @@ target_include_directories(ngp-xayah
         ${ZSTR_INCLUDE_DIRS}
 )
 
+# args
+find_package(args CONFIG REQUIRED)
+target_link_libraries(ngp-xayah PRIVATE taywee::args)
+
+# stb
+find_package(Stb REQUIRED)
+target_include_directories(ngp-xayah PRIVATE ${Stb_INCLUDE_DIR})
+
+# tinyobjloader
+find_package(tinyobjloader CONFIG REQUIRED)
+target_link_libraries(ngp-xayah PRIVATE tinyobjloader::tinyobjloader)
+
 # ZLIB
 find_package(ZLIB REQUIRED)
 find_path(ZSTR_INCLUDE_DIRS "zstr.hpp")
