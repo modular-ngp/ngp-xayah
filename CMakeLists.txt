@@ -7,25 +7,25 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API ON)
+set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
 set(CMAKE_CUDA_ARCHITECTURES 120 CACHE STRING "CUDA archs" FORCE)
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_EXTENSIONS OFF)
+set(CMAKE_CUDA_EXTENSIONS ON)
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 set(CMAKE_CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
 add_library(ngp-xayah)
 target_sources(ngp-xayah
+        PRIVATE
+        src/ngp.device.cu
+        src/ngp.device.cpp
         PUBLIC FILE_SET cxx_modules TYPE CXX_MODULES FILES
         modules/ngp.dataset.nerfsynthetic.ixx
         modules/ngp.device.ixx
 )
-target_sources(ngp-xayah
-        PRIVATE
-        cuda/ngp.device.cu
-)
-set_source_files_properties(cuda/ngp.device.cu PROPERTIES LANGUAGE CUDA)
+set_target_properties(ngp-xayah PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 find_package(CUDAToolkit REQUIRED)
 target_link_libraries(ngp-xayah PRIVATE CUDA::cudart)

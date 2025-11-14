@@ -1,10 +1,6 @@
 export module ngp.device;
 
-extern "C" void launch_kernel();
-
-export void run_kernel() {
-    launch_kernel();
-}
+export void say_hello();
 
 // import ngp.dataset.nerfsynthetic;
 // namespace ngp::device {

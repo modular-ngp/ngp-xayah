@@ -124,5 +124,5 @@
 
 import ngp.device;
 int main() {
-    run_kernel();
+    say_hello();
 }
