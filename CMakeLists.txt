@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API ON)
 
 set(CMAKE_CUDA_ARCHITECTURES 120 CACHE STRING "CUDA archs" FORCE)
-set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
@@ -21,8 +21,17 @@ target_sources(ngp-xayah
         modules/ngp.dataset.nerfsynthetic.ixx
         modules/ngp.device.ixx
 )
+target_sources(ngp-xayah
+        PRIVATE
+        cuda/ngp.device.cu
+)
+set_source_files_properties(cuda/ngp.device.cu PROPERTIES LANGUAGE CUDA)
+
+find_package(CUDAToolkit REQUIRED)
+target_link_libraries(ngp-xayah PRIVATE CUDA::cudart)
 
 include(FetchContent)
+set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/_deps")
 set(TCNN_ALLOW_CUBLAS_CUSOLVER OFF CACHE BOOL "" FORCE)
 set(TCNN_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
 set(TCNN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -73,3 +82,6 @@ target_include_directories(ngp-xayah PRIVATE ${stb_SOURCE_DIR})
 set(stb_impl "${CMAKE_CURRENT_BINARY_DIR}/stb_image_impl.cpp")
 file(WRITE ${stb_impl} "#define STB_IMAGE_IMPLEMENTATION\n#include <stb_image.h>\n")
 target_sources(ngp-xayah PRIVATE ${stb_impl})
+
+add_executable(app main.cpp)
+target_link_libraries(app PRIVATE ngp-xayah)
