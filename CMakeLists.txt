@@ -31,7 +31,6 @@ find_package(CUDAToolkit REQUIRED)
 target_link_libraries(ngp-xayah PRIVATE CUDA::cudart)
 
 include(FetchContent)
-set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/_deps")
 set(TCNN_ALLOW_CUBLAS_CUSOLVER OFF CACHE BOOL "" FORCE)
 set(TCNN_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
 set(TCNN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -46,7 +45,7 @@ FetchContent_Declare(
         GIT_TAG master
 )
 FetchContent_MakeAvailable(tiny-cuda-nn)
-target_link_libraries(ngp-xayah PUBLIC tiny-cuda-nn)
+target_link_libraries(ngp-xayah PRIVATE tiny-cuda-nn)
 
 FetchContent_Declare(
         threadpool
