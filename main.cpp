@@ -123,6 +123,8 @@
 // }
 
 import ngp.device;
+import ngp.dataset.nerfsynthetic;
 int main() {
-    say_hello();
+    ngp::dataset::NeRFSyntheticDataset dataset;
+    ngp::dataset::to_device(dataset);
 }
