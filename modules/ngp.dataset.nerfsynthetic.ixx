@@ -4,7 +4,6 @@ module;
 #include <filesystem>
 
 export module ngp.dataset.nerfsynthetic;
-import threadpool;
 
 namespace ngp::dataset {
     export struct NeRFSyntheticDataset {
