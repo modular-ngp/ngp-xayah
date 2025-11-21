@@ -19,11 +19,11 @@ set(CMAKE_CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 add_library(ngp-xayah)
 target_sources(ngp-xayah
         PRIVATE
-        src/ngp.dataset.nerfsynthetic.cpp
+        src/ngp.dataset.cpp
         src/ngp.train.cu
         src/ngp.train.cpp
         PUBLIC FILE_SET cxx_modules TYPE CXX_MODULES FILES
-        modules/ngp.dataset.nerfsynthetic.ixx
+        modules/ngp.dataset.ixx
         modules/ngp.train.ixx
 )
 set_target_properties(ngp-xayah PROPERTIES CUDA_SEPARABLE_COMPILATION ON)

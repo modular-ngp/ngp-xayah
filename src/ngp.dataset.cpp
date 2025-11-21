@@ -4,7 +4,7 @@ module;
 #include <stb_image.h>
 #include <nlohmann/json.hpp>
 
-module ngp.dataset.nerfsynthetic;
+module ngp.dataset;
 import threadpool;
 
 namespace ngp::dataset {

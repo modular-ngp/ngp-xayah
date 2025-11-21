@@ -3,7 +3,7 @@ module;
 #include <vector>
 #include <filesystem>
 
-export module ngp.dataset.nerfsynthetic;
+export module ngp.dataset;
 
 namespace ngp::dataset {
     export struct NeRFSyntheticDataset {
