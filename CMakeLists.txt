@@ -21,6 +21,7 @@ target_sources(ngp-xayah
         PRIVATE
         src/ngp.device.cu
         src/ngp.device.cpp
+        src/ngp.dataset.nerfsynthetic.cpp
         PUBLIC FILE_SET cxx_modules TYPE CXX_MODULES FILES
         modules/ngp.dataset.nerfsynthetic.ixx
         modules/ngp.device.ixx

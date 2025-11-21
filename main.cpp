@@ -125,6 +125,6 @@
 import ngp.device;
 import ngp.dataset.nerfsynthetic;
 int main() {
-    ngp::dataset::NeRFSyntheticDataset dataset;
+    const ngp::dataset::NeRFSyntheticDataset& dataset = ngp::dataset::load_nerf_synthetic_dataset("C:/Users/xayah/Desktop/instant-ngp/data/nerf-synthetic/lego/transforms_train.json");
     ngp::dataset::to_device(dataset);
 }
