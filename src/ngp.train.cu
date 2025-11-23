@@ -7,11 +7,9 @@
 #include <tiny-cuda-nn/network_with_input_encoding.h>
 #include <tiny-cuda-nn/trainer.h>
 #include <memory>
+#include <iostream>
 
-namespace ngp::train::cuda {
-
-
-#if defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__))
+namespace ngp::train::cuda::impl {
     constexpr uint32_t N_THREADS_LINEAR = 128;
 
     template <typename T>
@@ -130,24 +128,6 @@ namespace ngp::train::cuda {
     inline void parallel_for_gpu_soa(size_t n_elements, uint32_t n_dims, F&& fun) {
         parallel_for_gpu_soa(nullptr, n_elements, n_dims, std::forward<F>(fun));
     }
-#endif
-
-    struct NGPContext {
-        static NGPContext& instance() {
-            static NGPContext instance;
-            return instance;
-        }
-
-        std::shared_ptr<tcnn::Loss<tcnn::network_precision_t>> m_loss;
-        std::shared_ptr<tcnn::Optimizer<tcnn::network_precision_t>> m_optimizer;
-        std::shared_ptr<tcnn::Encoding<tcnn::network_precision_t>> m_encoding;
-        std::shared_ptr<tcnn::Network<float, tcnn::network_precision_t>> m_network;
-        std::shared_ptr<tcnn::Trainer<float, tcnn::network_precision_t, tcnn::network_precision_t>> m_trainer;
-
-    private:
-        NGPContext()  = default;
-        ~NGPContext() = default;
-    };
 
     template <typename T>
     __global__ void extract_density(const uint32_t n_elements, const uint32_t density_stride,
@@ -229,7 +209,7 @@ namespace ngp::train::cuda {
     };
 
     template <typename T>
-    NerfNetwork<T>::NerfNetwork(uint32_t n_pos_dims, uint32_t n_dir_dims, uint32_t n_extra_dims, uint32_t dir_offset, const nlohmann::json& pos_encoding, const nlohmann::json& dir_encoding, const nlohmann::json& density_network, const nlohmann::json& rgb_network)
+    NerfNetwork<T>::NerfNetwork(const uint32_t n_pos_dims, const uint32_t n_dir_dims, const uint32_t n_extra_dims, const uint32_t dir_offset, const nlohmann::json& pos_encoding, const nlohmann::json& dir_encoding, const nlohmann::json& density_network, const nlohmann::json& rgb_network)
         : m_dir_offset{dir_offset}, m_n_dir_dims{n_dir_dims}, m_n_extra_dims{n_extra_dims}, m_n_pos_dims{n_pos_dims} {
         m_pos_encoding.reset(
             tcnn::create_encoding<T>(n_pos_dims, pos_encoding,
@@ -518,24 +498,61 @@ namespace ngp::train::cuda {
         }
     }
 
-    void reset_loss(const nlohmann::json& loss_config) {
-        NGPContext::instance().m_loss.reset(tcnn::create_loss<tcnn::network_precision_t>(loss_config));
-    }
+    struct NGPContext {
+        static NGPContext& instance() {
+            static NGPContext instance;
+            return instance;
+        }
 
-    void reset_optimizer(const nlohmann::json& optimizer_config) {
-        NGPContext::instance().m_optimizer.reset(tcnn::create_optimizer<tcnn::network_precision_t>(optimizer_config));
-    }
+        void reset_session(const nlohmann::json& config);
 
-    void reset_encoding(const nlohmann::json& encoding_config) {
-    }
+    private:
+        NGPContext()  = default;
+        ~NGPContext() = default;
 
-    void reset_network(const nlohmann::json& network_config) {
-        NerfNetwork<tcnn::network_precision_t> network(32, 3, 0, 32,
-            network_config["pos_encoding"], network_config["dir_encoding"],
-            network_config["density_network"], network_config["rgb_network"]);
-    }
+        std::shared_ptr<tcnn::Loss<tcnn::network_precision_t>> m_loss;
+        std::shared_ptr<tcnn::Optimizer<tcnn::network_precision_t>> m_optimizer;
+        std::shared_ptr<tcnn::Network<float, tcnn::network_precision_t>> m_network;
+        std::shared_ptr<tcnn::Trainer<float, tcnn::network_precision_t, tcnn::network_precision_t>> m_trainer;
+        uint32_t m_seed = 1337;
+    };
 
+    void NGPContext::reset_session(const nlohmann::json& config) {
+        const auto& loss_config         = config["loss"];
+        const auto& optimizer_config    = config["optimizer"];
+        const auto& network_config      = config["network"];
+        const auto& encoding_config     = config["encoding"];
+        const auto& dir_encoding_config = config["dir_encoding"];
+        const auto& rgb_network_config  = config["rgb_network"];
+
+        auto loss_config_expand     = loss_config;
+        loss_config_expand["otype"] = "L2";
+        uint32_t n_pos              = 3;
+        uint32_t n_input            = 7;
+        uint32_t n_output           = 4;
+        uint32_t n_dir_dims         = 3;
+        uint32_t n_extra_dims       = 0;
+
+        m_loss.reset(tcnn::create_loss<tcnn::network_precision_t>(loss_config_expand));
+        m_optimizer.reset(tcnn::create_optimizer<tcnn::network_precision_t>(optimizer_config));
+        m_network = std::make_shared<NerfNetwork<tcnn::network_precision_t>>(n_pos, n_dir_dims, n_extra_dims, n_pos + 1, encoding_config, dir_encoding_config, network_config, rgb_network_config);
+        m_trainer = std::make_shared<tcnn::Trainer<float, tcnn::network_precision_t, tcnn::network_precision_t>>(m_network, m_optimizer, m_loss, m_seed);
+
+        auto optimizer_config_expand          = optimizer_config;
+        nlohmann::json* leaf_optimizer_config = &optimizer_config_expand;
+        while (leaf_optimizer_config->contains("nested")) leaf_optimizer_config = &(*leaf_optimizer_config)["nested"];
+        (*leaf_optimizer_config)["optimize_matrix_params"]     = true;
+        (*leaf_optimizer_config)["optimize_non_matrix_params"] = true;
+        m_optimizer->update_hyperparams(optimizer_config_expand);
+    }
+}
+
+namespace ngp::train::cuda {
     void find_devices() {
         printf("Finding CUDA devices...\n");
+    }
+
+    void reset_context(const nlohmann::json& config) {
+        impl::NGPContext::instance().reset_session(config);
     }
 }
