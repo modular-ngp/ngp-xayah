@@ -20,8 +20,9 @@ add_library(ngp-xayah)
 target_sources(ngp-xayah
         PRIVATE
         src/ngp.dataset.cpp
-        src/ngp.train.cu
         src/ngp.train.cpp
+        src/cuda/ngp.cuda.cu
+        src/cuda/ngp.cuda.session.cu
         PUBLIC FILE_SET cxx_modules TYPE CXX_MODULES FILES
         modules/ngp.dataset.ixx
         modules/ngp.train.ixx

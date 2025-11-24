@@ -1,133 +1,13 @@
-#include "ngp.train.h"
+#ifndef NGP_XAYAH_NGP_CUDA_NERFNETWORK_H
+#define NGP_XAYAH_NGP_CUDA_NERFNETWORK_H
 
-#include <tiny-cuda-nn/loss.h>
 #include <tiny-cuda-nn/optimizer.h>
 #include <tiny-cuda-nn/encoding.h>
 #include <tiny-cuda-nn/network.h>
 #include <tiny-cuda-nn/network_with_input_encoding.h>
 #include <tiny-cuda-nn/trainer.h>
-#include <memory>
-#include <iostream>
 
-namespace ngp::train::cuda::impl {
-    constexpr uint32_t N_THREADS_LINEAR = 128;
-
-    template <typename T>
-    TCNN_HOST_DEVICE T div_round_up(T val, T divisor) {
-        return (val + divisor - 1) / divisor;
-    }
-
-    template <typename T>
-    constexpr TCNN_HOST_DEVICE uint32_t n_blocks_linear(T n_elements, uint32_t n_threads = N_THREADS_LINEAR) {
-        return (uint32_t) div_round_up(n_elements, (T) n_threads);
-    }
-
-    template <typename K, typename T, typename... Types>
-    inline void linear_kernel(K kernel, uint32_t shmem_size, cudaStream_t stream, T n_elements, Types... args) {
-        if (n_elements <= 0) {
-            return;
-        }
-        kernel<<<n_blocks_linear(n_elements), N_THREADS_LINEAR, shmem_size, stream>>>(n_elements, args...);
-    }
-
-    template <typename T>
-    TCNN_HOST_DEVICE T next_multiple(T val, T divisor) {
-        return div_round_up(val, divisor) * divisor;
-    }
-
-    template <typename F>
-    __global__ void parallel_for_kernel(const size_t n_elements, F fun) {
-        const size_t i = threadIdx.x + blockIdx.x * blockDim.x;
-        if (i >= n_elements) return;
-
-        fun(i);
-    }
-
-    template <typename F>
-    inline void parallel_for_gpu(uint32_t shmem_size, cudaStream_t stream, size_t n_elements, F&& fun) {
-        if (n_elements <= 0) {
-            return;
-        }
-        parallel_for_kernel<F><<<n_blocks_linear(n_elements), N_THREADS_LINEAR, shmem_size, stream>>>(n_elements, fun);
-    }
-
-    template <typename F>
-    inline void parallel_for_gpu(cudaStream_t stream, size_t n_elements, F&& fun) {
-        parallel_for_gpu(0, stream, n_elements, std::forward<F>(fun));
-    }
-
-    template <typename F>
-    inline void parallel_for_gpu(size_t n_elements, F&& fun) {
-        parallel_for_gpu(nullptr, n_elements, std::forward<F>(fun));
-    }
-
-    template <typename F>
-    __global__ void parallel_for_aos_kernel(const size_t n_elements, const uint32_t n_dims, F fun) {
-        const size_t dim  = threadIdx.x;
-        const size_t elem = threadIdx.y + blockIdx.x * blockDim.y;
-        if (dim >= n_dims) return;
-        if (elem >= n_elements) return;
-
-        fun(elem, dim);
-    }
-
-    template <typename F>
-    inline void parallel_for_gpu_aos(uint32_t shmem_size, cudaStream_t stream, size_t n_elements, uint32_t n_dims, F&& fun) {
-        if (n_elements <= 0 || n_dims <= 0) {
-            return;
-        }
-
-        const dim3 threads     = {n_dims, div_round_up(N_THREADS_LINEAR, n_dims), 1};
-        const size_t n_threads = threads.x * threads.y;
-        const dim3 blocks      = {(uint32_t) div_round_up(n_elements * n_dims, n_threads), 1, 1};
-
-        parallel_for_aos_kernel<<<blocks, threads, shmem_size, stream>>>(
-            n_elements, n_dims, fun
-            );
-    }
-
-    template <typename F>
-    inline void parallel_for_gpu_aos(cudaStream_t stream, size_t n_elements, uint32_t n_dims, F&& fun) {
-        parallel_for_gpu_aos(0, stream, n_elements, n_dims, std::forward<F>(fun));
-    }
-
-    template <typename F>
-    inline void parallel_for_gpu_aos(size_t n_elements, uint32_t n_dims, F&& fun) {
-        parallel_for_gpu_aos(nullptr, n_elements, n_dims, std::forward<F>(fun));
-    }
-
-    template <typename F>
-    __global__ void parallel_for_soa_kernel(const size_t n_elements, const uint32_t n_dims, F fun) {
-        const size_t elem = threadIdx.x + blockIdx.x * blockDim.x;
-        const size_t dim  = blockIdx.y;
-        if (elem >= n_elements) return;
-        if (dim >= n_dims) return;
-
-        fun(elem, dim);
-    }
-
-    template <typename F>
-    inline void parallel_for_gpu_soa(uint32_t shmem_size, cudaStream_t stream, size_t n_elements, uint32_t n_dims, F&& fun) {
-        if (n_elements <= 0 || n_dims <= 0) {
-            return;
-        }
-
-        const dim3 blocks = {n_blocks_linear(n_elements), n_dims, 1};
-
-        parallel_for_soa_kernel<<<n_blocks_linear(n_elements), N_THREADS_LINEAR, shmem_size, stream>>>(
-            n_elements, n_dims, fun
-            );
-    }
-
-    template <typename F>
-    inline void parallel_for_gpu_soa(cudaStream_t stream, size_t n_elements, uint32_t n_dims, F&& fun) {
-        parallel_for_gpu_soa(0, stream, n_elements, n_dims, std::forward<F>(fun));
-    }
-
-    template <typename F>
-    inline void parallel_for_gpu_soa(size_t n_elements, uint32_t n_dims, F&& fun) {
-        parallel_for_gpu_soa(nullptr, n_elements, n_dims, std::forward<F>(fun));
-    }
+namespace ngp::cuda {
 
     template <typename T>
     __global__ void extract_density(const uint32_t n_elements, const uint32_t density_stride,
@@ -182,6 +62,7 @@ namespace ngp::train::cuda::impl {
         std::pair<const T*, tcnn::MatrixLayout> forward_activations(const tcnn::Context& ctx, uint32_t layer) const override;
 
     private:
+        friend struct NGPSession;
         std::shared_ptr<tcnn::Network<T>> m_density_network;
         std::shared_ptr<tcnn::Network<T>> m_rgb_network;
         std::shared_ptr<tcnn::Encoding<T>> m_pos_encoding;
@@ -228,8 +109,7 @@ namespace ngp::train::cuda::impl {
         }
         m_density_network.reset(tcnn::create_network<T>(local_density_network_config));
 
-        m_rgb_network_input_width = next_multiple(
-            m_dir_encoding->padded_output_width() + m_density_network->padded_output_width(), rgb_alignment);
+        m_rgb_network_input_width = tcnn::next_multiple(m_dir_encoding->padded_output_width() + m_density_network->padded_output_width(), rgb_alignment);
 
         nlohmann::json local_rgb_network_config   = rgb_network;
         local_rgb_network_config["n_input_dims"]  = m_rgb_network_input_width;
@@ -325,7 +205,7 @@ namespace ngp::train::cuda::impl {
         m_rgb_network->inference_mixed_precision(stream, rgb_network_input, rgb_network_output,
             use_inference_params);
 
-        linear_kernel(extract_density<T>, 0, stream, batch_size,
+        tcnn::linear_kernel(extract_density<T>, 0, stream, batch_size,
             density_network_output.layout() == tcnn::AoS ? density_network_output.stride() : 1,
             output.layout() == tcnn::AoS ? padded_output_width() : 1, density_network_output.data(),
             output.data() + 3 * (output.layout() == tcnn::AoS ? 1 : batch_size));
@@ -369,7 +249,7 @@ namespace ngp::train::cuda::impl {
             use_inference_params, prepare_input_gradients);
 
         if (output) {
-            linear_kernel(
+            tcnn::linear_kernel(
                 extract_density<T>, 0, stream, batch_size,
                 m_dir_encoding->preferred_output_layout() == tcnn::AoS ? forward->density_network_output.stride() : 1,
                 padded_output_width(), forward->density_network_output.data(), output->data() + 3);
@@ -387,7 +267,7 @@ namespace ngp::train::cuda::impl {
 
         tcnn::GPUMatrix<T> dL_drgb{m_rgb_network->padded_output_width(), batch_size, stream};
         CUDA_CHECK_THROW(cudaMemsetAsync(dL_drgb.data(), 0, dL_drgb.n_bytes(), stream));
-        linear_kernel(extract_rgb<T>, 0, stream, batch_size * 3, dL_drgb.m(), dL_doutput.m(), dL_doutput.data(),
+        tcnn::linear_kernel(extract_rgb<T>, 0, stream, batch_size * 3, dL_drgb.m(), dL_doutput.m(), dL_doutput.data(),
             dL_drgb.data());
 
         const tcnn::GPUMatrixDynamic<T> rgb_network_output{static_cast<T*>(output.data()), m_rgb_network->padded_output_width(),
@@ -416,7 +296,7 @@ namespace ngp::train::cuda::impl {
 
         tcnn::GPUMatrixDynamic<T> dL_ddensity_network_output =
             dL_drgb_network_input.slice_rows(0, m_density_network->padded_output_width());
-        linear_kernel(add_density_gradient<T>, 0, stream, batch_size, dL_doutput.m(), dL_doutput.data(),
+        tcnn::linear_kernel(add_density_gradient<T>, 0, stream, batch_size, dL_doutput.m(), dL_doutput.data(),
             dL_ddensity_network_output.layout() == tcnn::RM ? 1 : dL_ddensity_network_output.stride(),
             dL_ddensity_network_output.data());
 
@@ -497,62 +377,6 @@ namespace ngp::train::cuda::impl {
                 layer - 2 - m_density_network->num_forward_activations());
         }
     }
-
-    struct NGPContext {
-        static NGPContext& instance() {
-            static NGPContext instance;
-            return instance;
-        }
-
-        void reset_session(const nlohmann::json& config);
-
-    private:
-        NGPContext()  = default;
-        ~NGPContext() = default;
-
-        std::shared_ptr<tcnn::Loss<tcnn::network_precision_t>> m_loss;
-        std::shared_ptr<tcnn::Optimizer<tcnn::network_precision_t>> m_optimizer;
-        std::shared_ptr<tcnn::Network<float, tcnn::network_precision_t>> m_network;
-        std::shared_ptr<tcnn::Trainer<float, tcnn::network_precision_t, tcnn::network_precision_t>> m_trainer;
-        uint32_t m_seed = 1337;
-    };
-
-    void NGPContext::reset_session(const nlohmann::json& config) {
-        const auto& loss_config         = config["loss"];
-        const auto& optimizer_config    = config["optimizer"];
-        const auto& network_config      = config["network"];
-        const auto& encoding_config     = config["encoding"];
-        const auto& dir_encoding_config = config["dir_encoding"];
-        const auto& rgb_network_config  = config["rgb_network"];
-
-        auto loss_config_expand     = loss_config;
-        loss_config_expand["otype"] = "L2";
-        uint32_t n_pos              = 3;
-        uint32_t n_input            = 7;
-        uint32_t n_output           = 4;
-        uint32_t n_dir_dims         = 3;
-        uint32_t n_extra_dims       = 0;
-
-        m_loss.reset(tcnn::create_loss<tcnn::network_precision_t>(loss_config_expand));
-        m_optimizer.reset(tcnn::create_optimizer<tcnn::network_precision_t>(optimizer_config));
-        m_network = std::make_shared<NerfNetwork<tcnn::network_precision_t>>(n_pos, n_dir_dims, n_extra_dims, n_pos + 1, encoding_config, dir_encoding_config, network_config, rgb_network_config);
-        m_trainer = std::make_shared<tcnn::Trainer<float, tcnn::network_precision_t, tcnn::network_precision_t>>(m_network, m_optimizer, m_loss, m_seed);
-
-        auto optimizer_config_expand          = optimizer_config;
-        nlohmann::json* leaf_optimizer_config = &optimizer_config_expand;
-        while (leaf_optimizer_config->contains("nested")) leaf_optimizer_config = &(*leaf_optimizer_config)["nested"];
-        (*leaf_optimizer_config)["optimize_matrix_params"]     = true;
-        (*leaf_optimizer_config)["optimize_non_matrix_params"] = true;
-        m_optimizer->update_hyperparams(optimizer_config_expand);
-    }
 }
 
-namespace ngp::train::cuda {
-    void find_devices() {
-        printf("Finding CUDA devices...\n");
-    }
-
-    void reset_context(const nlohmann::json& config) {
-        impl::NGPContext::instance().reset_session(config);
-    }
-}
+#endif //NGP_XAYAH_NGP_CUDA_NERFNETWORK_H

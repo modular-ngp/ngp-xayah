@@ -1,5 +1,5 @@
 module;
-#include "ngp.train.h"
+#include "cuda/ngp.cuda.h"
 #include <json/json.hpp>
 #include <fstream>
 #include <print>
@@ -11,14 +11,14 @@ namespace ngp::train {
     }
 
     void session_load_tcnn_config(const std::filesystem::path& path) {
-        cuda::reset_context(nlohmann::json::parse(std::ifstream(path)));
+        cuda::reset_session(nlohmann::json::parse(std::ifstream(path)));
     }
 
     void end_session() {
-
     }
 
-    void train(size_t epoch) {
+    void train(const size_t batchsize) {
+        cuda::train(batchsize);
     }
 
     NGP_STATE query_ngp_state() {

@@ -10,7 +10,7 @@ namespace ngp::train {
     export void start_session(NGP_DATASET_TYPE type);
     export void session_load_tcnn_config(const std::filesystem::path& path);
     export void end_session();
-    export void train(size_t epoch);
+    export void train(size_t batchsize);
 
     export enum class NGP_STATE {
         IDLE,
