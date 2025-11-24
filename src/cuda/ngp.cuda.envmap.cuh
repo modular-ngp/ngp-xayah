@@ -1,27 +1,12 @@
 #ifndef NGP_XAYAH_NGP_CUDA_ENVMAP_CUH
 #define NGP_XAYAH_NGP_CUDA_ENVMAP_CUH
+#include "random_val.cuh"
+
 #include <tiny-cuda-nn/common.h>
 
 namespace ngp::cuda {
     using vec4  = tcnn::vec4;
     using ivec2 = tcnn::ivec2;
-
-    inline constexpr TCNN_HOST_DEVICE float PI() {
-        return 3.14159265358979323846f;
-    }
-
-    inline __host__ __device__ vec2 dir_to_spherical(const vec3& d) {
-        const float cos_theta = fminf(fmaxf(d.z, -1.0f), 1.0f);
-        const float theta     = acosf(cos_theta);
-        float phi             = atan2(d.y, d.x);
-        return {theta, phi};
-    }
-
-    inline __host__ __device__ vec2 dir_to_spherical_unorm(const vec3& d) {
-        vec2 spherical = dir_to_spherical(d);
-        return {spherical.x / PI(), (spherical.y / (2.0f * PI()) + 0.5f)};
-    }
-
 
     template <typename T>
     struct Buffer2DView {

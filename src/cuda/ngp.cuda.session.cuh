@@ -4,6 +4,9 @@
 #include <tiny-cuda-nn/gpu_memory.h>
 #include <tiny-cuda-nn/rtc_kernel.h>
 #include <json/json.hpp>
+#include <pcg32/pcg32.h>
+
+#include "ngp.cuda.boundingbox.cuh"
 
 namespace tcnn {
     template <typename T>
@@ -49,6 +52,8 @@ namespace ngp::cuda {
             float update_after_training(uint32_t target_batch_size, bool get_loss_scalar, cudaStream_t stream);
         } m_counters_rgb;
 
+        BoundingBox m_aabb = {vec3(0.0f), vec3(1.0f)};
+
         std::shared_ptr<tcnn::Loss<tcnn::network_precision_t>> m_loss;
         std::shared_ptr<tcnn::Optimizer<tcnn::network_precision_t>> m_optimizer;
         std::shared_ptr<tcnn::Network<float, tcnn::network_precision_t>> m_network;
@@ -56,6 +61,7 @@ namespace ngp::cuda {
         std::shared_ptr<tcnn::Trainer<float, tcnn::network_precision_t, tcnn::network_precision_t>> m_trainer;
         uint32_t m_seed = 1337;
         cudaStream_t m_stream;
+        tcnn::pcg32 m_rng;
 
         uint32_t m_training_step               = 0;
         uint32_t n_rays_since_error_map_update = 0;

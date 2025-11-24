@@ -4,8 +4,7 @@
 #include <tiny-cuda-nn/common.h>
 
 namespace ngp::cuda {
-    using vec2 = tcnn::vec2;
-    using vec3 = tcnn::vec3;
+    using namespace tcnn;
 
     inline TCNN_HOST_DEVICE float normdot(const vec3& a, const vec3& b) {
         float div = length(a) * length(b);
