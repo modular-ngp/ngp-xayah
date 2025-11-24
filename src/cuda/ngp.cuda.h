@@ -4,7 +4,6 @@
 #include <json/json.hpp>
 
 namespace ngp::cuda {
-    void find_devices();
     void reset_session(const nlohmann::json& config);
     void train(uint32_t batchsize);
 }

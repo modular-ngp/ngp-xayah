@@ -18,7 +18,7 @@ namespace tcnn {
     class Trainer;
     template <uint32_t N_DIMS, uint32_t RANK, typename T>
     class TrainableBuffer;
-} // namespace tcnn
+}
 
 namespace ngp::cuda {
 
