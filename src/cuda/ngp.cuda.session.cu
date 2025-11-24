@@ -1,6 +1,7 @@
 #include "ngp.cuda.session.cuh"
 #include "ngp.cuda.nerfnetwork.cuh"
 #include "ngp.cuda.boundingbox.cuh"
+#include "ngp.cuda.envmap.cuh"
 
 #include <tiny-cuda-nn/encodings/multi_level_interface.h>
 
