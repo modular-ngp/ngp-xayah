@@ -5,8 +5,7 @@
 #include <tiny-cuda-nn/common.h>
 
 namespace ngp::cuda {
-    using vec4  = tcnn::vec4;
-    using ivec2 = tcnn::ivec2;
+    using namespace tcnn;
 
     template <typename T>
     struct Buffer2DView {

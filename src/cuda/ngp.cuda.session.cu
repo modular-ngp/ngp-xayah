@@ -1,41 +1,27 @@
 #include "ngp.cuda.session.cuh"
 #include "ngp.cuda.nerfnetwork.cuh"
 #include "ngp.cuda.envmap.cuh"
-#include "ngp.cuda.utils.cuh"
 
 #include <tiny-cuda-nn/encodings/multi_level_interface.h>
 
 namespace ngp::cuda {
+    using namespace tcnn;
+
+    static constexpr float LOSS_SCALE() {
+        return default_loss_scale<network_precision_t>();
+    }
+
     __global__ void generate_training_samples_nerf(
-        const uint32_t n_rays,
-        BoundingBox aabb,
-        const uint32_t max_samples,
-        const uint32_t n_rays_total,
-        tcnn::pcg32 rng,
-        uint32_t* __restrict__ ray_counter,
-        uint32_t* __restrict__ numsteps_counter,
-        uint32_t* __restrict__ ray_indices_out,
-        tcnn::Ray* __restrict__ rays_out_unnormalized,
-        uint32_t* __restrict__ numsteps_out,
-        tcnn::PitchedPtr<NerfCoordinate> coords_out,
-        const uint32_t n_training_images,
-        const TrainingImageMetadata* __restrict__ metadata,
-        const TrainingXForm* training_xforms,
-        const uint8_t* __restrict__ density_grid,
-        uint32_t max_mip,
-        bool max_level_rand_training,
-        float* __restrict__ max_level_ptr,
-        bool snap_to_pixel_centers,
-        bool train_envmap,
-        float cone_angle_constant,
-        Buffer2DView<const vec2> distortion,
-        const float* __restrict__ cdf_x_cond_y,
-        const float* __restrict__ cdf_y,
-        const float* __restrict__ cdf_img,
-        const ivec2 cdf_res,
-        const float* __restrict__ extra_dims_gpu,
-        uint32_t n_extra_dims
-        ) {
+        const uint32_t n_rays, BoundingBox aabb, const uint32_t max_samples, const uint32_t n_rays_total,
+        default_rng_t rng, uint32_t* __restrict__ ray_counter, uint32_t* __restrict__ numsteps_counter,
+        uint32_t* __restrict__ ray_indices_out, Ray* __restrict__ rays_out_unnormalized,
+        uint32_t* __restrict__ numsteps_out, PitchedPtr<NerfCoordinate> coords_out, const uint32_t n_training_images,
+        const TrainingImageMetadata* __restrict__ metadata, const TrainingXForm* training_xforms,
+        const uint8_t* __restrict__ density_grid, uint32_t max_mip, bool max_level_rand_training,
+        float* __restrict__ max_level_ptr, bool snap_to_pixel_centers, bool train_envmap, float cone_angle_constant,
+        Buffer2DView<const vec2> distortion, const float* __restrict__ cdf_x_cond_y, const float* __restrict__ cdf_y,
+        const float* __restrict__ cdf_img, const ivec2 cdf_res, const float* __restrict__ extra_dims_gpu,
+        uint32_t n_extra_dims) {
         const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
         if (i >= n_rays) {
             return;
@@ -68,8 +54,8 @@ namespace ngp::cuda {
         const mat4x3 xform =
             get_xform_given_rolling_shutter(training_xforms[img], metadata[img].rolling_shutter, uv, motionblur_time);
 
-        tcnn::Ray ray_unnormalized;
-        const tcnn::Ray* rays_in_unnormalized = metadata[img].rays;
+        Ray ray_unnormalized;
+        const Ray* rays_in_unnormalized = metadata[img].rays;
         if (rays_in_unnormalized) {
             // Rays have been explicitly supplied. Read them.
             ray_unnormalized = rays_in_unnormalized[pix_idx];
@@ -164,6 +150,316 @@ namespace ngp::cuda {
             }
         }
     }
+
+
+    __global__ void compute_loss_kernel_train_nerf(
+        const uint32_t n_rays, BoundingBox aabb, const uint32_t n_rays_total, default_rng_t rng,
+        const uint32_t max_samples_compacted, const uint32_t* __restrict__ rays_counter, float loss_scale,
+        int padded_output_width, Buffer2DView<const vec4> envmap, float* __restrict__ envmap_gradient,
+        const ivec2 envmap_resolution, ELossType envmap_loss_type, vec3 background_color, EColorSpace color_space,
+        bool train_with_random_bg_color, bool train_in_linear_colors, const uint32_t n_training_images,
+        const TrainingImageMetadata* __restrict__ metadata, const network_precision_t* network_output,
+        uint32_t* __restrict__ numsteps_counter, const uint32_t* __restrict__ ray_indices_in,
+        const Ray* __restrict__ rays_in_unnormalized, uint32_t* __restrict__ numsteps_in,
+        PitchedPtr<const NerfCoordinate> coords_in, PitchedPtr<NerfCoordinate> coords_out,
+        network_precision_t* dloss_doutput, ELossType loss_type, ELossType depth_loss_type,
+        float* __restrict__ loss_output, bool max_level_rand_training, float* __restrict__ max_level_compacted_ptr,
+        ENerfActivation rgb_activation, ENerfActivation density_activation, bool snap_to_pixel_centers,
+        float* __restrict__ error_map, const float* __restrict__ cdf_x_cond_y, const float* __restrict__ cdf_y,
+        const float* __restrict__ cdf_img, const ivec2 error_map_res, const ivec2 error_map_cdf_res,
+        const float* __restrict__ sharpness_data, ivec2 sharpness_resolution, float* __restrict__ sharpness_grid,
+        float* __restrict__ density_grid, const float* __restrict__ mean_density_ptr, uint32_t max_mip,
+        const vec3* __restrict__ exposure, vec3* __restrict__ exposure_gradient, float depth_supervision_lambda,
+        float near_distance) {
+        const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+        if (i >= *rays_counter) {
+            return;
+        }
+
+        // grab the number of samples for this ray, and the first sample
+        uint32_t numsteps = numsteps_in[i * 2 + 0];
+        uint32_t base     = numsteps_in[i * 2 + 1];
+
+        coords_in += base;
+        network_output += base * padded_output_width;
+
+        float T = 1.f;
+
+        float EPSILON = 1e-4f;
+
+        vec3 rgb_ray  = vec3(0.0f);
+        vec3 hitpoint = vec3(0.0f);
+
+        float depth_ray             = 0.f;
+        uint32_t compacted_numsteps = 0;
+        vec3 ray_o                  = rays_in_unnormalized[i].o;
+        for (; compacted_numsteps < numsteps; ++compacted_numsteps) {
+            if (T < EPSILON) {
+                break;
+            }
+
+            const tvec<network_precision_t, 4> local_network_output = *(tvec<network_precision_t, 4>*) network_output;
+            const vec3 rgb                                          = network_to_rgb_vec(local_network_output, rgb_activation);
+            const vec3 pos                                          = unwarp_position(coords_in.ptr->pos.p, aabb);
+            const float dt                                          = unwarp_dt(coords_in.ptr->dt);
+            float cur_depth                                         = distance(pos, ray_o);
+            float density                                           = network_to_density(float(local_network_output[3]), density_activation);
+
+
+            const float alpha  = 1.f - __expf(-density * dt);
+            const float weight = alpha * T;
+            rgb_ray += weight * rgb;
+            hitpoint += weight * pos;
+            depth_ray += weight * cur_depth;
+            T *= (1.f - alpha);
+
+            network_output += padded_output_width;
+            coords_in += 1;
+        }
+        hitpoint /= (1.0f - T);
+
+        // Must be same seed as above to obtain the same
+        // background color.
+        uint32_t ray_idx = ray_indices_in[i];
+        rng.advance(ray_idx * N_MAX_RANDOM_SAMPLES_PER_RAY());
+
+        float img_pdf    = 1.0f;
+        uint32_t img     = image_idx(ray_idx, n_rays, n_rays_total, n_training_images, cdf_img, &img_pdf);
+        ivec2 resolution = metadata[img].resolution;
+
+        float uv_pdf = 1.0f;
+        vec2 uv      = nerf_random_image_pos_training(rng, resolution, snap_to_pixel_centers, cdf_x_cond_y, cdf_y,
+            error_map_cdf_res, img, &uv_pdf);
+        float max_level = max_level_rand_training
+                              ? (random_val(rng) * 2.0f)
+                              : 1.0f; // Multiply by 2 to ensure 50% of training is at max level
+        rng.advance(1); // motionblur_time
+
+        if (train_with_random_bg_color) {
+            background_color = random_val_3d(rng);
+        }
+        vec3 pre_envmap_background_color = background_color = srgb_to_linear(background_color);
+
+        // Composit background behind envmap
+        vec4 envmap_value;
+        vec3 dir;
+        if (envmap) {
+            dir              = normalize(rays_in_unnormalized[i].d);
+            envmap_value     = read_envmap(envmap, dir);
+            background_color = envmap_value.rgb() + background_color * (1.0f - envmap_value.a);
+        }
+
+        vec3 exposure_scale = exp(0.6931471805599453f * exposure[img]);
+        // vec3 rgbtarget = composit_and_lerp(uv, resolution, img, training_images, background_color, exposure_scale);
+        // vec3 rgbtarget = composit(uv, resolution, img, training_images, background_color, exposure_scale);
+        vec4 texsamp = read_rgba(uv, resolution, metadata[img].pixels, metadata[img].image_data_type);
+
+        vec3 rgbtarget;
+        if (train_in_linear_colors || color_space == EColorSpace::Linear) {
+            rgbtarget = exposure_scale * texsamp.rgb() + (1.0f - texsamp.a) * background_color;
+
+            if (!train_in_linear_colors) {
+                rgbtarget        = linear_to_srgb(rgbtarget);
+                background_color = linear_to_srgb(background_color);
+            }
+        } else if (color_space == EColorSpace::SRGB) {
+            background_color = linear_to_srgb(background_color);
+            if (texsamp.a > 0) {
+                rgbtarget = linear_to_srgb(exposure_scale * texsamp.rgb() / texsamp.a) * texsamp.a +
+                            (1.0f - texsamp.a) * background_color;
+            } else {
+                rgbtarget = background_color;
+            }
+        }
+
+        if (compacted_numsteps == numsteps) {
+            // support arbitrary background colors
+            rgb_ray += T * background_color;
+        }
+
+        // Step again, this time computing loss
+        network_output -= padded_output_width * compacted_numsteps; // rewind the pointer
+        coords_in -= compacted_numsteps;
+
+        uint32_t compacted_base =
+            atomicAdd(numsteps_counter, compacted_numsteps); // first entry in the array is a counter
+        compacted_numsteps =
+            min(max_samples_compacted - min(max_samples_compacted, compacted_base), compacted_numsteps);
+        numsteps_in[i * 2 + 0] = compacted_numsteps;
+        numsteps_in[i * 2 + 1] = compacted_base;
+        if (compacted_numsteps == 0) {
+            return;
+        }
+
+        max_level_compacted_ptr += compacted_base;
+        coords_out += compacted_base;
+
+        dloss_doutput += compacted_base * padded_output_width;
+
+        LossAndGradient lg = loss_and_gradient(rgbtarget, rgb_ray, loss_type);
+        lg.loss /= img_pdf * uv_pdf;
+
+        float target_depth = length(rays_in_unnormalized[i].d) *
+                             ((depth_supervision_lambda > 0.0f && metadata[img].depth)
+                                  ? read_depth(uv, resolution, metadata[img].depth)
+                                  : -1.0f);
+        LossAndGradient lg_depth  = loss_and_gradient(vec3(target_depth), vec3(depth_ray), depth_loss_type);
+        float depth_loss_gradient = target_depth > 0.0f ? depth_supervision_lambda * lg_depth.gradient.x : 0;
+
+        // Note: dividing the gradient by the PDF would cause unbiased loss estimates.
+        // Essentially: variance reduction, but otherwise the same optimization.
+        // We _dont_ want that. If importance sampling is enabled, we _do_ actually want
+        // to change the weighting of the loss function. So don't divide.
+        // lg.gradient /= img_pdf * uv_pdf;
+
+        float mean_loss = mean(lg.loss);
+        if (loss_output) {
+            loss_output[i] = mean_loss / (float) n_rays;
+        }
+
+        if (error_map) {
+            const vec2 pos      = clamp(uv * vec2(error_map_res) - 0.5f, 0.0f, vec2(error_map_res) - (1.0f + 1e-4f));
+            const ivec2 pos_int = pos;
+            const vec2 weight   = pos - vec2(pos_int);
+
+            ivec2 idx = clamp(pos_int, 0, resolution - 2);
+
+            auto deposit_val = [&](int x, int y, float val) {
+                atomicAdd(&error_map[img * product(error_map_res) + y * error_map_res.x + x], val);
+            };
+
+            if (sharpness_data && aabb.contains(hitpoint)) {
+                ivec2 sharpness_pos = clamp(ivec2(uv * vec2(sharpness_resolution)), 0, sharpness_resolution - 1);
+                float sharp         = sharpness_data[img * product(sharpness_resolution) +
+                                             sharpness_pos.y * sharpness_resolution.x + sharpness_pos.x] +
+                              1e-6f;
+
+                // The maximum value of positive floats interpreted in uint format is the same as the maximum value of
+                // the floats.
+                float grid_sharp = __uint_as_float(
+                    atomicMax((uint32_t*) &cascaded_grid_at(hitpoint, sharpness_grid, mip_from_pos(hitpoint, max_mip)),
+                        __float_as_uint(sharp)));
+                grid_sharp =
+                    fmaxf(sharp, grid_sharp); // atomicMax returns the old value, so compute the new one locally.
+
+                mean_loss *= fmaxf(sharp / grid_sharp, 0.01f);
+            }
+
+            deposit_val(idx.x, idx.y, (1 - weight.x) * (1 - weight.y) * mean_loss);
+            deposit_val(idx.x + 1, idx.y, weight.x * (1 - weight.y) * mean_loss);
+            deposit_val(idx.x, idx.y + 1, (1 - weight.x) * weight.y * mean_loss);
+            deposit_val(idx.x + 1, idx.y + 1, weight.x * weight.y * mean_loss);
+        }
+
+        loss_scale /= n_rays;
+
+        const float output_l2_reg         = rgb_activation == ENerfActivation::Exponential ? 1e-4f : 0.0f;
+        const float output_l1_reg_density = *mean_density_ptr < NERF_MIN_OPTICAL_THICKNESS() ? 1e-4f : 0.0f;
+
+        // now do it again computing gradients
+        vec3 rgb_ray2    = {0.f, 0.f, 0.f};
+        float depth_ray2 = 0.f;
+        T                = 1.f;
+        for (uint32_t j = 0; j < compacted_numsteps; ++j) {
+            if (max_level_rand_training) {
+                max_level_compacted_ptr[j] = max_level;
+            }
+            // Compact network inputs
+            NerfCoordinate* coord_out      = coords_out(j);
+            const NerfCoordinate* coord_in = coords_in(j);
+            coord_out->copy(*coord_in, coords_out.stride_in_bytes);
+
+            const vec3 pos = unwarp_position(coord_in->pos.p, aabb);
+            float depth    = distance(pos, ray_o);
+
+            float dt                                                = unwarp_dt(coord_in->dt);
+            const tvec<network_precision_t, 4> local_network_output = *(tvec<network_precision_t, 4>*) network_output;
+            const vec3 rgb                                          = network_to_rgb_vec(local_network_output, rgb_activation);
+            const float density                                     = network_to_density(float(local_network_output[3]), density_activation);
+            const float alpha                                       = 1.f - __expf(-density * dt);
+            const float weight                                      = alpha * T;
+            rgb_ray2 += weight * rgb;
+            depth_ray2 += weight * depth;
+            T *= (1.f - alpha);
+
+            // we know the suffix of this ray compared to where we are up to. note the suffix depends on this step's
+            // alpha as suffix = (1-alpha)*(somecolor), so dsuffix/dalpha = -somecolor = -suffix/(1-alpha)
+            const vec3 suffix        = rgb_ray - rgb_ray2;
+            const vec3 dloss_by_drgb = weight * lg.gradient;
+
+            tvec<network_precision_t, 4> local_dL_doutput;
+
+            // chain rule to go from dloss/drgb to dloss/dmlp_output
+            local_dL_doutput[0] = loss_scale *
+                                  (dloss_by_drgb.x * network_to_rgb_derivative(local_network_output[0], rgb_activation) +
+                                   fmaxf(0.0f, output_l2_reg * (float) local_network_output[0])); // Penalize way too large color values
+            local_dL_doutput[1] = loss_scale *
+                                  (dloss_by_drgb.y * network_to_rgb_derivative(local_network_output[1], rgb_activation) +
+                                   fmaxf(0.0f, output_l2_reg * (float) local_network_output[1]));
+            local_dL_doutput[2] = loss_scale *
+                                  (dloss_by_drgb.z * network_to_rgb_derivative(local_network_output[2], rgb_activation) +
+                                   fmaxf(0.0f, output_l2_reg * (float) local_network_output[2]));
+
+            float density_derivative =
+                network_to_density_derivative(float(local_network_output[3]), density_activation);
+            const float depth_suffix      = depth_ray - depth_ray2;
+            const float depth_supervision = depth_loss_gradient * (T * depth - depth_suffix);
+
+            float dloss_by_dmlp = density_derivative * (dt * (dot(lg.gradient, T * rgb - suffix) + depth_supervision));
+
+            // static constexpr float mask_supervision_strength = 1.f; // we are already 'leaking' mask information into
+            // the nerf via the random bg colors; setting this to eg between 1 and  100 encourages density towards 0 in
+            // such regions. dloss_by_dmlp += (texsamp.a<0.001f) ? mask_supervision_strength * weight : 0.f;
+
+            local_dL_doutput[3] = loss_scale * dloss_by_dmlp +
+                                  (float(local_network_output[3]) < 0.0f ? -output_l1_reg_density : 0.0f) +
+                                  (float(local_network_output[3]) > -10.0f && depth < near_distance ? 1e-4f : 0.0f);;
+
+            *(tvec<network_precision_t, 4>*) dloss_doutput = local_dL_doutput;
+
+            dloss_doutput += padded_output_width;
+            network_output += padded_output_width;
+        }
+
+        if (exposure_gradient) {
+            // Assume symmetric loss
+            vec3 dloss_by_dgt = -lg.gradient / uv_pdf;
+
+            if (!train_in_linear_colors) {
+                dloss_by_dgt /= srgb_to_linear_derivative(rgbtarget);
+            }
+
+            // 2^exposure * log(2)
+            vec3 dloss_by_dexposure = loss_scale * dloss_by_dgt * exposure_scale * 0.6931471805599453f;
+            atomicAdd(&exposure_gradient[img].x, dloss_by_dexposure.x);
+            atomicAdd(&exposure_gradient[img].y, dloss_by_dexposure.y);
+            atomicAdd(&exposure_gradient[img].z, dloss_by_dexposure.z);
+        }
+
+        if (compacted_numsteps == numsteps && envmap_gradient) {
+            vec3 loss_gradient = lg.gradient;
+            if (envmap_loss_type != loss_type) {
+                loss_gradient = loss_and_gradient(rgbtarget, rgb_ray, envmap_loss_type).gradient;
+            }
+
+            vec3 dloss_by_dbackground = T * loss_gradient;
+            if (!train_in_linear_colors) {
+                dloss_by_dbackground /= srgb_to_linear_derivative(background_color);
+            }
+
+            tvec<network_precision_t, 4> dL_denvmap;
+            dL_denvmap[0] = loss_scale * dloss_by_dbackground.x;
+            dL_denvmap[1] = loss_scale * dloss_by_dbackground.y;
+            dL_denvmap[2] = loss_scale * dloss_by_dbackground.z;
+
+            float dloss_by_denvmap_alpha = -dot(dloss_by_dbackground, pre_envmap_background_color);
+
+            // dL_denvmap[3] = loss_scale * dloss_by_denvmap_alpha;
+            dL_denvmap[3] = (network_precision_t) 0;
+
+            deposit_envmap_gradient(dL_denvmap, envmap_gradient, envmap_resolution, dir);
+        }
+    }
 }
 
 
@@ -198,7 +494,7 @@ void ngp::cuda::NGPSession::reset_session(const nlohmann::json& config) {
 }
 
 void ngp::cuda::NGPSession::train(const uint32_t batchsize) {
-    m_counters_rgb.prepare_for_training_steps(m_stream);
+    counters.prepare_for_training_steps(m_stream);
 
 
     const uint32_t padded_output_width = m_network->padded_output_width();
@@ -220,7 +516,7 @@ void ngp::cuda::NGPSession::train(const uint32_t batchsize) {
         float, // max_level_compacted
         uint32_t // ray_counter
     >(
-        m_stream, &alloc, m_counters_rgb.rays_per_batch, m_counters_rgb.rays_per_batch, m_counters_rgb.rays_per_batch * 2,
+        m_stream, &alloc, counters.rays_per_batch, counters.rays_per_batch, counters.rays_per_batch * 2,
         max_samples * floats_per_coord, max_samples, std::max(batchsize, max_samples) * padded_output_width,
         batchsize * padded_output_width, batchsize * floats_per_coord,
         batchsize * floats_per_coord, batchsize, 1);
@@ -238,10 +534,10 @@ void ngp::cuda::NGPSession::train(const uint32_t batchsize) {
     uint32_t* ray_counter                     = std::get<10>(scratch);
 
     uint32_t max_inference;
-    if (m_counters_rgb.measured_batch_size_before_compaction == 0) {
-        m_counters_rgb.measured_batch_size_before_compaction = max_inference = max_samples;
+    if (counters.measured_batch_size_before_compaction == 0) {
+        counters.measured_batch_size_before_compaction = max_inference = max_samples;
     } else {
-        max_inference = tcnn::next_multiple(std::min(m_counters_rgb.measured_batch_size_before_compaction, max_samples), tcnn::BATCH_SIZE_GRANULARITY);
+        max_inference = tcnn::next_multiple(std::min(counters.measured_batch_size_before_compaction, max_samples), tcnn::BATCH_SIZE_GRANULARITY);
     }
 
 
@@ -250,89 +546,71 @@ void ngp::cuda::NGPSession::train(const uint32_t batchsize) {
     tcnn::GPUMatrix<tcnn::network_precision_t> gradient_matrix(dloss_dmlp_out, padded_output_width, batchsize);
 
 
-    if (m_training_step == 0) m_counters_rgb.n_rays_total = 0;
-    uint32_t n_rays_total = m_counters_rgb.n_rays_total;
-    m_counters_rgb.n_rays_total += m_counters_rgb.rays_per_batch;
-    n_rays_since_error_map_update += m_counters_rgb.rays_per_batch;
+    if (m_training_step == 0) counters.n_rays_total = 0;
+    uint32_t n_rays_total = counters.n_rays_total;
+    counters.n_rays_total += counters.rays_per_batch;
+    n_rays_since_error_map_update += counters.rays_per_batch;
 
 
     CUDA_CHECK_THROW(cudaMemsetAsync(ray_counter, 0, sizeof(uint32_t), m_stream));
 
     auto hg_enc = dynamic_cast<tcnn::MultiLevelEncoding<tcnn::network_precision_t>*>(m_encoding.get());
 
-    {
-        // tcnn::linear_kernel(
-        //     generate_training_samples_nerf,
-        //     0,
-        //     m_stream,
-        //     m_counters_rgb.rays_per_batch,
-        //     m_aabb,
-        //     max_inference,
-        //     n_rays_total,
-        //     m_rng,
-        //     ray_counter,
-        //     m_counters_rgb.numsteps_counter.data(),
-        //     ray_indices,
-        //     rays_unnormalized,
-        //     numsteps,
-        //     tcnn::PitchedPtr<NerfCoordinate>((NerfCoordinate*) coords, 1, 0, extra_stride),
-        //     m_nerf.training.n_images_for_training,
-        //     m_nerf.training.dataset.metadata_gpu.data(),
-        //     m_nerf.training.transforms_gpu.data(),
-        //     m_nerf.density_grid_bitfield.data(),
-        //     m_nerf.max_cascade,
-        //     m_max_level_rand_training,
-        //     max_level,
-        //     m_nerf.training.snap_to_pixel_centers,
-        //     m_nerf.training.train_envmap,
-        //     m_nerf.cone_angle_constant,
-        //     m_distortion.view(),
-        //     nullptr,
-        //     nullptr,
-        //     nullptr,
-        //     m_nerf.training.error_map.cdf_resolution,
-        //     m_nerf.training.extra_dims_gpu.data(),
-        //     m_nerf_network->n_extra_dims());
-
-        // if (hg_enc) {
-        //     hg_enc->set_max_level_gpu(m_max_level_rand_training ? max_level : nullptr);
-        // }
-
-        //     tcnn::GPUMatrix<float> coords_matrix((float*) coords, floats_per_coord, max_inference);
-        //     tcnn::GPUMatrix<tcnn::network_precision_t> rgbsigma_matrix(mlp_out, padded_output_width, max_inference);
-        //     m_network->inference_mixed_precision(m_stream, coords_matrix, rgbsigma_matrix, false);
-        //
-        //     if (hg_enc) {
-        //         hg_enc->set_max_level_gpu(m_max_level_rand_training ? max_level_compacted : nullptr);
-        //     }
-        //
-        //     tcnn::linear_kernel(
-        //         compute_loss_kernel_train_nerf, 0, m_stream, m_counters_rgb.rays_per_batch, m_aabb, n_rays_total, m_rng,
-        //         target_batch_size, ray_counter, LOSS_SCALE(), padded_output_width, m_envmap.view(), envmap_gradient,
-        //         m_envmap.resolution, m_envmap.loss_type, m_background_color.rgb(), m_color_space,
-        //         m_nerf.training.random_bg_color, m_nerf.training.linear_colors, m_nerf.training.n_images_for_training,
-        //         m_nerf.training.dataset.metadata_gpu.data(), mlp_out, m_counters_rgb.numsteps_counter_compacted.data(),
-        //         ray_indices, rays_unnormalized, numsteps,
-        //         PitchedPtr<const NerfCoordinate>((NerfCoordinate*) coords, 1, 0, extra_stride),
-        //         PitchedPtr<NerfCoordinate>((NerfCoordinate*) coords_compacted, 1, 0, extra_stride), dloss_dmlp_out,
-        //         m_nerf.training.loss_type, m_nerf.training.depth_loss_type, m_counters_rgb.loss.data(),
-        //         m_max_level_rand_training, max_level_compacted, m_nerf.rgb_activation, m_nerf.density_activation,
-        //         m_nerf.training.snap_to_pixel_centers,
-        //         accumulate_error ? m_nerf.training.error_map.data.data() : nullptr,
-        //         nullptr,
-        //         nullptr,
-        //         nullptr,
-        //         m_nerf.training.error_map.resolution, m_nerf.training.error_map.cdf_resolution,
-        //         nullptr,
-        //         m_nerf.training.dataset.sharpness_resolution, m_nerf.training.sharpness_grid.data(),
-        //         m_nerf.density_grid.data(), m_nerf.density_grid_mean.data(), m_nerf.max_cascade,
-        //         m_nerf.training.cam_exposure_gpu.data(),
-        //         m_nerf.training.optimize_exposure ? m_nerf.training.cam_exposure_gradient_gpu.data() : nullptr,
-        //         m_nerf.training.depth_supervision_lambda, m_nerf.training.near_distance);
-    }
-
-
-    m_trainer->optimizer_step(m_stream, tcnn::default_loss_scale<tcnn::network_precision_t>());
+    // {
+    //     // TODO:: 1125 START FROM HERE
+    //     bool sample_focal_plane_proportional_to_error = false;
+    //     bool sample_image_proportional_to_error       = false;
+    //     bool include_sharpness_in_error               = false;
+    //     linear_kernel(
+    //         generate_training_samples_nerf, 0, m_stream, counters.rays_per_batch, m_aabb, max_inference, n_rays_total,
+    //         m_rng, ray_counter, counters.numsteps_counter.data(), ray_indices, rays_unnormalized, numsteps,
+    //         PitchedPtr<NerfCoordinate>((NerfCoordinate*) coords, 1, 0, extra_stride),
+    //         m_nerf.training.n_images_for_training, m_nerf.training.dataset.metadata_gpu.data(),
+    //         m_nerf.training.transforms_gpu.data(), m_nerf.density_grid_bitfield.data(), m_nerf.max_cascade,
+    //         m_max_level_rand_training, max_level, m_nerf.training.snap_to_pixel_centers,
+    //         m_nerf.training.train_envmap, m_nerf.cone_angle_constant, m_distortion.view(),
+    //         sample_focal_plane_proportional_to_error ? m_nerf.training.error_map.cdf_x_cond_y.data() : nullptr,
+    //         sample_focal_plane_proportional_to_error ? m_nerf.training.error_map.cdf_y.data() : nullptr,
+    //         sample_image_proportional_to_error ? m_nerf.training.error_map.cdf_img.data() : nullptr,
+    //         m_nerf.training.error_map.cdf_resolution, m_nerf.training.extra_dims_gpu.data(),
+    //         0);
+    //
+    //     if (hg_enc) {
+    //         hg_enc->set_max_level_gpu(m_max_level_rand_training ? max_level : nullptr);
+    //     }
+    //
+    //     GPUMatrix<float> coords_matrix((float*) coords, floats_per_coord, max_inference);
+    //     GPUMatrix<network_precision_t> rgbsigma_matrix(mlp_out, padded_output_width, max_inference);
+    //     m_network->inference_mixed_precision(m_stream, coords_matrix, rgbsigma_matrix, false);
+    //
+    //     if (hg_enc) {
+    //         hg_enc->set_max_level_gpu(m_max_level_rand_training ? max_level_compacted : nullptr);
+    //     }
+    //
+    //     linear_kernel(
+    //         compute_loss_kernel_train_nerf, 0, m_stream, counters.rays_per_batch, m_aabb, n_rays_total, m_rng,
+    //         target_batch_size, ray_counter, LOSS_SCALE(), padded_output_width, m_envmap.view(), envmap_gradient,
+    //         m_envmap.resolution, m_envmap.loss_type, m_background_color.rgb(), m_color_space,
+    //         m_nerf.training.random_bg_color, m_nerf.training.linear_colors, m_nerf.training.n_images_for_training,
+    //         m_nerf.training.dataset.metadata_gpu.data(), mlp_out, counters.numsteps_counter_compacted.data(),
+    //         ray_indices, rays_unnormalized, numsteps,
+    //         PitchedPtr<const NerfCoordinate>((NerfCoordinate*) coords, 1, 0, extra_stride),
+    //         PitchedPtr<NerfCoordinate>((NerfCoordinate*) coords_compacted, 1, 0, extra_stride), dloss_dmlp_out,
+    //         m_nerf.training.loss_type, m_nerf.training.depth_loss_type, counters.loss.data(),
+    //         m_max_level_rand_training, max_level_compacted, m_nerf.rgb_activation, m_nerf.density_activation,
+    //         m_nerf.training.snap_to_pixel_centers,
+    //         accumulate_error ? m_nerf.training.error_map.data.data() : nullptr,
+    //         sample_focal_plane_proportional_to_error ? m_nerf.training.error_map.cdf_x_cond_y.data() : nullptr,
+    //         sample_focal_plane_proportional_to_error ? m_nerf.training.error_map.cdf_y.data() : nullptr,
+    //         sample_image_proportional_to_error ? m_nerf.training.error_map.cdf_img.data() : nullptr,
+    //         m_nerf.training.error_map.resolution, m_nerf.training.error_map.cdf_resolution,
+    //         include_sharpness_in_error ? m_nerf.training.dataset.sharpness_data.data() : nullptr,
+    //         m_nerf.training.dataset.sharpness_resolution, m_nerf.training.sharpness_grid.data(),
+    //         m_nerf.density_grid.data(), m_nerf.density_grid_mean.data(), m_nerf.max_cascade,
+    //         m_nerf.training.cam_exposure_gpu.data(),
+    //         m_nerf.training.optimize_exposure ? m_nerf.training.cam_exposure_gradient_gpu.data() : nullptr,
+    //         m_nerf.training.depth_supervision_lambda, m_nerf.training.near_distance);
+    // }
 }
 
 void ngp::cuda::NGPSession::NerfCounters::prepare_for_training_steps(cudaStream_t stream) {

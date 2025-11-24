@@ -2,11 +2,15 @@
 #define NGP_XAYAH_NGP_CUDA_UTILS_H
 
 #include "random_val.cuh"
+#include "ngp.cuda.envmap.cuh"
 
 #include <tiny-cuda-nn/common.h>
+#include <tiny-cuda-nn/common_device.h>
 
 
 namespace ngp::cuda {
+    using namespace tcnn;
+
     enum class ELensMode : int {
         Perspective,
         OpenCV,
@@ -57,10 +61,20 @@ namespace ngp::cuda {
         Exponential,
     };
 
-    inline TCNN_HOST_DEVICE uint32_t binary_search(float val, const float* data, uint32_t length)
-    {
-        if (length == 0)
-        {
+    enum class EColorSpace : int {
+        Linear,
+        SRGB,
+        VisPosNeg,
+    };
+
+    enum class ETrainMode : int {
+        Nerf,
+        Rfl,
+        RflRelax,
+    };
+
+    inline TCNN_HOST_DEVICE uint32_t binary_search(float val, const float* data, uint32_t length) {
+        if (length == 0) {
             return 0;
         }
 
@@ -69,18 +83,14 @@ namespace ngp::cuda {
         count = length;
 
         uint32_t first = 0;
-        while (count > 0)
-        {
-            it = first;
+        while (count > 0) {
+            it   = first;
             step = count / 2;
             it += step;
-            if (data[it] < val)
-            {
+            if (data[it] < val) {
                 first = ++it;
                 count -= step + 1;
-            }
-            else
-            {
+            } else {
                 count = step;
             }
         }
